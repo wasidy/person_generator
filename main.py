@@ -41,6 +41,13 @@ schedulers = {
     'DPMSolverMultistepScheduler': DPMSolverMultistepScheduler
 }
 
+def disabled_safety_checker(images, clip_input):
+    if len(images.shape)==4:
+        num_images = images.shape[0]
+        return images, [False]*num_images
+    else:
+        return images, False
+
 
 def smooth_mask(image, smooth_size=10, expand=10):
     if expand > 0:
@@ -97,7 +104,8 @@ class SDPipe():
             self.pipe = StableDiffusionPipeline.from_single_file(
                  self.path+'/'+filename,
                  torch_dtype=torch.float16,
-                 use_safetensors=True
+                 use_safetensors=True,
+                 safety_checker=None
                  )
             self.img2img = StableDiffusionImg2ImgPipeline(
                 vae=self.pipe.vae,
@@ -110,6 +118,7 @@ class SDPipe():
                 requires_safety_checker=False)
 
             self.pipe = self.pipe.to(device)
+            self.pipe.safety_checker = disabled_safety_checker
             self.img2img = self.img2img.to(device)
 
             print(f'Checkpoint {self.path + filename} loaded!')
@@ -202,6 +211,7 @@ class SDPipe():
         image = current_pipe(prompt=positive_prompt,
                              negative_prompt=negative_prompt,
                              generator=generator,
+                             safety_checker=None,
                              num_inference_steps=steps,
                              height=(height//8)*8, width=(width//8)*8,
                              cross_attention_kwargs={"scale": lora_scale},
@@ -389,4 +399,4 @@ if __name__ == '__main__':
     pipe = SDPipe(config)
     
     demo = ui(pipe, config)
-    demo.launch()
+    demo.launch(server_name = '0.0.0.0')
