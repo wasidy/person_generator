@@ -1,6 +1,7 @@
 {
     "checkpoints_folder": "D:/SD/",
     "lora_folder": "D:/Lora/",
+    "lora_face_folder": "D:/Lora/face/",
     "output_folder": "./output/",
     "default_prompt": "1girl, sexy young woman, wearing dress, photorealistic, photography, vivid colors, Canon, Nikon, 8k, 4k, high quality, bestquality, masterpiece, detailed skin, sharp skin, textured",
     "default_negative_prompt": "bad quality, ugly, wrong anatomy, bad face, anime, 3d, cartoon"

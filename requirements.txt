@@ -1,0 +1,15 @@
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch
+torchvision
+transformers==4.36.2
+omegaconf==2.3.0
+diffusers==0.25.0
+gradio==4.14.0
+opencv-python
+Pillow
+numpy
+supervision
+peft
+ultralytics
+color-matcher
+pillow-lut
