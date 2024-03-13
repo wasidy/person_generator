@@ -10,8 +10,12 @@ from diffusers import DEISMultistepScheduler, KDPM2AncestralDiscreteScheduler
 from diffusers import DDPMScheduler, EulerDiscreteScheduler, HeunDiscreteScheduler
 from diffusers import PNDMScheduler, LMSDiscreteScheduler, UniPCMultistepScheduler
 from diffusers import EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler
+from diffusers import AutoencoderKL
+from diffusers import StableDiffusionLatentUpscalePipeline
+from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
+from diffusers import StableDiffusionXLImg2ImgPipeline
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageEnhance
 from pillow_lut import load_cube_file
 import numpy as np
 from utils.face_detector import FaceDetector
@@ -91,6 +95,7 @@ def get_file_list(path, ext):
 
 
 def save_image(image, path):
+    # TODO! Write to folder with current date!
     img = Image.fromarray(image, mode='RGB')
     c_time = re.sub('[:. -]', '', str(datetime.today()))
     f_name = path + c_time + '.png'
@@ -112,14 +117,105 @@ class SDPipe():
         self.lora_face_path = config['lora_face_folder']
         self.active_pipe = 'text2img'
 
+    def load_sdxl_i2i_checkpoint(self, filename):
+        
+        del self.pipe
+        self.pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(
+            self.path + '/' + filename, torch_dtype=torch.float16,
+            use_safetensors=True)
+        self.pipe = self.pipe.to('cuda')
+        self.pipe.enable_xformers_memory_efficient_attention()
+        return filename
+    
+    def generate_img2img_xl(self,
+                            prompt,
+                            negative_prompt,
+                            input_image,
+                            strength,
+                            width,
+                            height,
+                            g_scale,
+                            seed,
+                            steps,
+                            lora_xl,
+                            lora_xl_weight,
+                            scheduler,
+                            scale):
+        # scheduler, steps, denoise strength, size, lora
+        
+        # prompt_xl_i2i,
+        # negative_prompt_xl_i2i,
+        # input_image_xl_i2i,
+        # denoise_xl_img_strength,
+        # width,
+        # height,
+        # g_scale,
+        # seed,
+        # steps,
+        # lora_xl_img2img,
+        # lora_xl_weight_img2img,
+        # gr_scheduler,
+        # img2img_xl_scale_factor
+        
+        # Проверить загруженный pipeline xl
+        # Пока не грузить lora, базовая генерация
+        
+        if isinstance(lora_xl, str):
+            if lora_xl != 'None':
+                print(f'Lora loaded: {lora_xl}')
+                adapter_name = lora_xl[0:lora_xl.find('.')]
+                self.pipe.load_lora_weights(self.lora_path + lora_xl,
+                                               weight_name=self.lora_path + lora_xl,
+                                               adapter_name=adapter_name)
+                trigger_words = load_trigger_words(self.lora_path + lora_xl)
+                prompt = prompt + ', ' + trigger_words
+                #print(f'New prompt: {positive_prompt}')
+                self.pipe.set_adapters(adapter_name)
+        
+        image = self.pipe(prompt=prompt,
+                          negative_prompt=negative_prompt,
+                          image=Image.fromarray(input_image),
+                          num_inference_steps=steps,
+                          strength=strength).images[0]
+        
+        if len(self.pipe.get_active_adapters()) > 0:
+            self.pipe.delete_adapters(adapter_name)
+        
+        return image, -1
+        
+
     def load_checkpoint(self, filename):
         try:
+            vae = AutoencoderKL.from_single_file("d:/SD/VAE/vae-ft-mse-840000-ema-pruned.safetensors")
             self.pipe = StableDiffusionPipeline.from_single_file(
                  self.path+'/'+filename,
+                 vae=vae,
                  torch_dtype=torch.float16,
                  use_safetensors=True,
                  safety_checker=None
                  )
+            # Temp loading latent upscaler
+            self.upscaler = StableDiffusionLatentUpscalePipeline.from_pretrained(
+                pretrained_model_name_or_path='stabilityai/sd-x2-latent-upscaler',
+                #low_res_scheduler=DDPMScheduler(),
+                #unet=self.pipe.unet,
+                
+                #scheduler=EulerDiscreteScheduler,
+                tokenizer=self.pipe.tokenizer,
+                text_encoder=self.pipe.text_encoder,
+                # vae=vae,
+                torch_dtype=torch.float16)
+            # self.upscaler.vae_scale_factor=1.5
+            self.upscaler.to("cuda")
+            
+            # self.controlnet = StableDiffusionControlNetPipeline(
+            #     unet=self.pipe.unet,
+            #     vae=self.pipe.vae,
+            #     text_encoder=self.pipe.text_encoder,
+            #     tokenizer=self.pipe.tokenizer,
+            #     torch_dtype=torch.float16
+            #     )
+            
             self.img2img = StableDiffusionImg2ImgPipeline(
                 vae=self.pipe.vae,
                 text_encoder=self.pipe.text_encoder,
@@ -133,7 +229,9 @@ class SDPipe():
             self.pipe = self.pipe.to(device)
             self.pipe.safety_checker = disabled_safety_checker
             self.img2img = self.img2img.to(device)
-
+            # test!
+            #self.pipe.load_textual_inversion("ti/browncoat42.safetensors", 'browncoat42')
+            
             print(f'Checkpoint {self.path + filename} loaded!')
         except Warning:
             print('Checkpoint corrupted!')
@@ -147,7 +245,7 @@ class SDPipe():
     def regen_face(self, positive_prompt, negative_prompt, input_image, output_image,
                    denoise_strength, width,
                    height, g_scale, manual_seed, steps, lora_name, lora_weight,
-                   scheduler_name):
+                   scheduler_name, *args):
         if not isinstance(input_image, np.ndarray):
             if not isinstance(output_image, np.ndarray):
                 print('No image')
@@ -159,14 +257,17 @@ class SDPipe():
         if lora_name !='None':
             lora_name = 'face/' + lora_name
         # lora_name = self.lora_person_path + lora_name
-
+        
         if len(faces) > 0:
             x1, y1, x2, y2 = faces[0].coords
             gen_size = 512
             face_size = faces[0].image.shape[0]
+            face_image = Image.fromarray(faces[0].image, mode='RGB')
+            print(f'Face image size: {face_image.size}')
+            face_image = np.array(face_image.resize((gen_size, gen_size)), dtype=np.uint8)
             gen_img, seed = self.generate_image(positive_prompt,
                                                 negative_prompt,
-                                                faces[0].image,
+                                                face_image,
                                                 denoise_strength,
                                                 gen_size,
                                                 gen_size,
@@ -200,10 +301,17 @@ class SDPipe():
             target.paste(new_image_wf, (0, 0), mask=alpha)
         return target, alpha
 
-    def generate_image(self, positive_prompt, negative_prompt, input_image,
-                       denoise_strength, width,
+    def generate_image(self, positive_prompt,
+                       negative_prompt,
+                       input_image,
+                       denoise_strength,
+                       width,
                        height, g_scale, manual_seed, steps, lora_name, lora_weight,
-                       scheduler_name):
+                       scheduler_name,
+                       use_latent_upscale=False,
+                       latent_num_steps=30,
+                       latent_guidance_scale=0,
+                       img2img_scale_factor=1):
         generator = torch.Generator(device=device)
         seed = generator.seed() if manual_seed == -1 else manual_seed
         generator = generator.manual_seed(seed)
@@ -212,9 +320,15 @@ class SDPipe():
         if isinstance(input_image, np.ndarray):
             print('Img2Img mode')
             current_pipe = self.img2img
+            height, width = input_image.shape[0:2]
+            print(f'Scale factor {img2img_scale_factor}')
+            height = int(height * img2img_scale_factor)
+            width= int(width * img2img_scale_factor)
             image = Image.fromarray(input_image, mode='RGB')
             image = image.resize((width, height), Image.LANCZOS)
             args = {'image': image, 'strength': denoise_strength}
+            
+            
 
         else:
             print('Text2Img mode')
@@ -231,19 +345,52 @@ class SDPipe():
                 positive_prompt = positive_prompt + ', ' + trigger_words
                 print(f'New prompt: {positive_prompt}')
                 current_pipe.set_adapters(adapter_name)
+        
+        # Test textual inversion
+        #positive_prompt = positive_prompt + ', <browncoat42>'
+        # current_pipe.set_adapters(adapter_name)
+
 
         print(f'Active adapters: {self.pipe.get_active_adapters()}')
         lora_scale = lora_weight/100
 
+
+
         current_pipe.scheduler = schedulers[scheduler_name].from_config(self.pipe.scheduler.config)
-        image = current_pipe(prompt=positive_prompt,
-                             negative_prompt=negative_prompt,
-                             generator=generator,
-                             safety_checker=None,
-                             num_inference_steps=steps,
-                             height=(height//8)*8, width=(width//8)*8,
-                             cross_attention_kwargs={"scale": lora_scale},
-                             g_scale=g_scale, **args).images[0]
+        if use_latent_upscale:
+        
+            low_res_image = current_pipe(prompt=positive_prompt,
+                                         negative_prompt=negative_prompt,
+                                         generator=generator,
+                                         safety_checker=None,
+                                         num_inference_steps=steps,
+                                         output_type='latent',
+                                         height=(height//8)*8, width=(width//8)*8,
+                                         cross_attention_kwargs={"scale": lora_scale},
+                                         g_scale=g_scale, **args).images[0]
+            # with torch.no_grad():
+            #     image = current_pipe.decode_latents(low_res_latents)
+            #     image = current_pipe.numpy_to_pil(image)[0]
+            # print(f'Inference steps for latent: {latent_num_steps}')
+            image = self.upscaler(prompt=positive_prompt,
+                                  negative_prompt=negative_prompt,
+                                  image=low_res_image,
+                                  num_inference_steps=latent_num_steps,
+                                  guidance_scale=latent_guidance_scale,
+                                  generator=generator,
+                                  #latents=low_res_image,
+                                  ).images[0]
+        else:
+            #current_pipe.vae.enable_tiling
+            image = current_pipe(prompt=positive_prompt,
+                                  negative_prompt=negative_prompt,
+                                  generator=generator,
+                                  safety_checker=None,
+                                  num_inference_steps=steps,
+                                  height=(height//8)*8, width=(width//8)*8,
+                                  cross_attention_kwargs={"scale": lora_scale},
+                                  g_scale=g_scale, **args).images[0]
+            #current_pipe.vae.disable_tiling
 
         if len(current_pipe.get_active_adapters()) > 0:
             current_pipe.delete_adapters(adapter_name)
@@ -256,19 +403,25 @@ def add_noise(img):
 def postprocess(input_img):
     img = Image.fromarray(input_img, mode='RGB')
     # img.save('temp/temp.jpg', format='JPEG', subsampling=0, quality=100)
-    img.save('temp/temp.jpg', format='JPEG', quality=60)
-    img = Image.open('temp/temp.jpg')
+    #img.save('temp/temp.jpg', format='JPEG', quality=60)
+    #img = Image.open('temp/temp.jpg')
     
     lut = load_cube_file('lut/Fuji F125 Kodak 2395 (by Adobe).cube')
     
     processed_image = img.filter(lut)
-    processed_image = processed_image.filter(ImageFilter.UnsharpMask(radius=1, percent=30, threshold=3))
+    #processed_image = processed_image.filter(ImageFilter.UnsharpMask(radius=1, percent=30, threshold=3))
+    
     
     processed_image = np.array(processed_image, dtype=np.uint8)
     
     temp_img1 = processed_image / 2.0
     temp_img2 = input_img / 2.0
     fin_img = (temp_img1 + temp_img2).astype(dtype=np.uint8)
+    
+    #enhancer = ImageEnhance.Sharpness(im)
+    #factor = 1
+    #im_s_1 = enhancer.enhance(factor)
+    
     print('Image postprocessed with LUT')
     return fin_img
 
@@ -285,131 +438,201 @@ def ui(pipe, config):
     with gr.Blocks() as demo:
         input_null_image = gr.Image(visible=False)
         with gr.Row():
-            with gr.Column():
-                with gr.Group():
-                    checkpoint = gr.Dropdown(label='Checkpoint',
-                                             choices=checkpoints,
-                                             value=checkpoints[0],
-                                             interactive=True)
-                    lora = gr.Dropdown(label='Lora',
-                                       choices=loras,
-                                       value=loras[0],
-                                       interactive=True
-                                       )
-                    lora_weight_base = gr.Slider(label='Weight:',
-                                                 value=90,
-                                                 minimum=0,
-                                                 maximum=100,
-                                                 step=1,
-                                                 interactive=True)
-                with gr.Row():
-
-                    prompt = gr.Textbox(label='Prompt',
-                                        value=config['default_prompt'],
-                                        lines=2,
-                                        )
-                    negative_prompt = gr.Textbox(label='Negative prompt',
-                                                 value=config['default_negative_prompt'],
-                                                 lines=2,
-                                                 )
-                with gr.Row():
-                    generate = gr.Button(value='Generate',
-                                         size='lg',
-                                         variant='primary',
-                                         )
-                with gr.Tabs():
-                    with gr.TabItem('Img2Img'):
-                        with gr.Row():
-                            with gr.Column():
-                                input_image = gr.Image(label='Imput image for Img2Img')
-
-                            with gr.Column():
-                                lora_img2img = gr.Dropdown(label='lora for img2img',
-                                                           choices=loras,
-                                                           value=loras[0],
-                                                           interactive=True
-                                                           )
-                                lora_weight_img2img = gr.Slider(label='Weight:',
-                                                                value=90,
-                                                                minimum=0,
-                                                                maximum=100,
-                                                                step=1,
-                                                                interactive=True)
-                                denoise_img_strength = gr.Slider(label='Denoise strength',
-                                                                 value=0.5,
-                                                                 minimum=0,
-                                                                 maximum=1,
-                                                                 step=0.01,
-                                                                 interactive=True)
-
-                                copy_out_to_in = gr.Button(value='Copy OUTPUT to INPUT')
-                                generate_img2img = gr.Button(value='GENERATE IMG2IMG',
-                                                             variant='primary')
-                    with gr.TabItem('Regen face'):
-
-                        with gr.Row():
-                            with gr.Column():
-
-                                input_image_face = gr.Image(label='Image for face regen')
-                            with gr.Column():
-                                lora_face = gr.Dropdown(label='Face lora',
-                                                        choices=loras_face,
-                                                        value=loras_face[0],
-                                                        interactive=True
-                                                        )
-                                lora_face_weight = gr.Slider(label='Weight:',
-                                                             value=90,
-                                                             minimum=0,
-                                                             maximum=100,
-                                                             step=1)
-                                denoise_face_strength = gr.Slider(label='Denoise strength',
-                                                                  value=0.5,
-                                                                  minimum=0,
-                                                                  maximum=1,
-                                                                  step=0.01)
-                                copy_out_to_in_face = gr.Button(value='Copy OUTPUT to INPUT')
-
-                                regen_face = gr.Button(value='GENERATE FACE',
-                                                       variant='primary')
-
-                with gr.Row():
-                    with gr.Column():
-                        with gr.Accordion('Generation settings'):
-                            schedulers_list = list(schedulers.keys())
-                            gr_scheduler = gr.Dropdown(label='Scheduler',
-                                                       choices=schedulers_list,
-                                                       value=schedulers_list[0])
-                            g_scale = gr.Slider(label='Guidance scale',
-                                                value=7.5,
-                                                minimum=1,
-                                                maximum=20)
-
-                            steps = gr.Slider(label='Steps',
-                                              value=30,
-                                              minimum=1,
-                                              maximum=100,
-                                              step=1
-                                              )
-                            seed = gr.Number(label='Seed',
-                                             value=-1,
-                                             precision=0,
-                                             interactive=True,
-                                             minimum=-1)
-                            last_seed = gr.State(value=-1)
-                            reuse_last_seed = gr.Button(value="Reuse last seed")
-                            reset_seed = gr.Button(value='Reset seed')
+            with gr.Tabs():
+                with gr.TabItem('Stable diffusion base generation'):
+                    
                     with gr.Column():
                         with gr.Group():
-                            width = gr.Slider(label='Width',
-                                              value=512,
-                                              minimum=256,
-                                              maximum=2048,
-                                              step=8)
-                            height = gr.Slider(label='Height',
-                                               value=768,
-                                               minimum=256,
-                                               maximum=2048,
-                                               step=8)
+                            checkpoint = gr.Dropdown(label='Checkpoint',
+                                                     choices=checkpoints,
+                                                     value=checkpoints[0],
+                                                     interactive=True)
+                            lora = gr.Dropdown(label='Lora',
+                                               choices=loras,
+                                               value=loras[0],
+                                               interactive=True
+                                               )
+                            lora_weight_base = gr.Slider(label='Weight:',
+                                                         value=90,
+                                                         minimum=0,
+                                                         maximum=100,
+                                                         step=1,
+                                                         interactive=True)
+                        with gr.Row():
+        
+                            prompt = gr.Textbox(label='Prompt',
+                                                value=config['default_prompt'],
+                                                lines=2,
+                                                )
+                            negative_prompt = gr.Textbox(label='Negative prompt',
+                                                         value=config['default_negative_prompt'],
+                                                         lines=2,
+                                                         )
+                        with gr.Row():
+                            generate = gr.Button(value='Generate',
+                                                 size='lg',
+                                                 variant='primary',
+                                                 )
+                        with gr.Accordion('Latent upscale'):
+                            use_latent_upscale = gr.Checkbox(label='Use latent upscale',
+                                                             value=False)
+                            latent_num_steps = gr.Slider(label='Steps',
+                                                         minimum=0,
+                                                         maximum=100,
+                                                         value=20,
+                                                         step=1)
+                            latent_guidance_scale = gr.Slider(label='Guidance scale',
+                                                              minimum=0,
+                                                              maximum=20,
+                                                              value=0,
+                                                              step=0.1)
+                        with gr.Tabs():
+                            with gr.TabItem('Img2Img'):
+                                with gr.Row():
+                                    with gr.Column():
+                                        input_image = gr.Image(label='Imput image for Img2Img')
+        
+                                    with gr.Column():
+                                        lora_img2img = gr.Dropdown(label='lora for img2img',
+                                                                   choices=loras,
+                                                                   value=loras[0],
+                                                                   interactive=True
+                                                                   )
+                                        lora_weight_img2img = gr.Slider(label='Weight:',
+                                                                        value=90,
+                                                                        minimum=0,
+                                                                        maximum=100,
+                                                                        step=1,
+                                                                        interactive=True)
+                                        denoise_img_strength = gr.Slider(label='Denoise strength',
+                                                                         value=0.5,
+                                                                         minimum=0,
+                                                                         maximum=1,
+                                                                         step=0.01,
+                                                                         interactive=True)
+                                        img2img_scale_factor = gr.Slider(label='Scale factor',
+                                                                         value=1,
+                                                                         minimum=0.5,
+                                                                         maximum=3,
+                                                                         step=0.1,
+                                                                         interactive=True)
+                                        copy_out_to_in = gr.Button(value='Copy OUTPUT to INPUT')
+                                        generate_img2img = gr.Button(value='GENERATE IMG2IMG',
+                                                                     variant='primary')
+                            with gr.TabItem('Regen face'):
+        
+                                with gr.Row():
+                                    with gr.Column():
+        
+                                        input_image_face = gr.Image(label='Image for face regen')
+                                    with gr.Column():
+                                        lora_face = gr.Dropdown(label='Face lora',
+                                                                choices=loras_face,
+                                                                value=loras_face[0],
+                                                                interactive=True
+                                                                )
+                                        lora_face_weight = gr.Slider(label='Weight:',
+                                                                     value=90,
+                                                                     minimum=0,
+                                                                     maximum=100,
+                                                                     step=1)
+                                        denoise_face_strength = gr.Slider(label='Denoise strength',
+                                                                          value=0.5,
+                                                                          minimum=0,
+                                                                          maximum=1,
+                                                                          step=0.01)
+                                        copy_out_to_in_face = gr.Button(value='Copy OUTPUT to INPUT')
+        
+                                        regen_face = gr.Button(value='GENERATE FACE',
+                                                               variant='primary')
+        
+                        with gr.Row():
+                            with gr.Column():
+                                with gr.Accordion('Generation settings'):
+                                    schedulers_list = list(schedulers.keys())
+                                    gr_scheduler = gr.Dropdown(label='Scheduler',
+                                                               choices=schedulers_list,
+                                                               value=schedulers_list[0])
+                                    g_scale = gr.Slider(label='Guidance scale',
+                                                        value=7.5,
+                                                        minimum=1,
+                                                        maximum=20)
+        
+                                    steps = gr.Slider(label='Steps',
+                                                      value=30,
+                                                      minimum=1,
+                                                      maximum=100,
+                                                      step=1
+                                                      )
+                                    seed = gr.Number(label='Seed',
+                                                     value=-1,
+                                                     precision=0,
+                                                     interactive=True,
+                                                     minimum=-1)
+                                    last_seed = gr.State(value=-1)
+                                    reuse_last_seed = gr.Button(value="Reuse last seed")
+                                    reset_seed = gr.Button(value='Reset seed')
+                            with gr.Column():
+                                with gr.Group():
+                                    width = gr.Slider(label='Width',
+                                                      value=512,
+                                                      minimum=256,
+                                                      maximum=2048,
+                                                      step=8)
+                                    height = gr.Slider(label='Height',
+                                                       value=768,
+                                                       minimum=256,
+                                                       maximum=2048,
+                                                       step=8)
+                with gr.TabItem('SDXL Img2Img'):
+                    # TODO либо разделить чек-поинты, либо сделать фильтрацию
+                    checkpoint_xl_i2i = gr.Dropdown(label='Checkpoint',
+                                                    choices=checkpoints,
+                                                    value=checkpoints[0],
+                                                    interactive=True)
+                    with gr.Row():
+    
+                        prompt_xl_i2i = gr.Textbox(label='Prompt',
+                                                   value=config['default_prompt'],
+                                                   lines=2,
+                                                   )
+                        negative_prompt_xl_i2i = gr.Textbox(label='Negative prompt',
+                                                            value=config['default_negative_prompt'],
+                                                            lines=2,
+                                                            )
+                    with gr.Row():
+                        with gr.Column():
+                            input_image_xl_i2i = gr.Image(label='Imput image for Img2Img')
+
+                        with gr.Column():
+                            lora_xl_img2img = gr.Dropdown(label='lora for img2img',
+                                                          choices=loras,
+                                                          value=loras[0],
+                                                          interactive=True
+                                                          )
+                            lora_xl_weight_img2img = gr.Slider(label='Weight:',
+                                                               value=90,
+                                                               minimum=0,
+                                                               maximum=100,
+                                                               step=1,
+                                                               interactive=True)
+                            denoise_xl_img_strength = gr.Slider(label='Denoise strength',
+                                                                value=0.5,
+                                                                minimum=0,
+                                                                maximum=1,
+                                                                step=0.01,
+                                                                interactive=True)
+                            img2img_xl_scale_factor = gr.Slider(label='Scale factor',
+                                                                value=1,
+                                                                minimum=0.5,
+                                                                maximum=3,
+                                                                step=0.1,
+                                                                interactive=True)
+                            copy_out_to_in_xl = gr.Button(value='Copy OUTPUT to INPUT')
+                            generate_img2img_xl= gr.Button(value='GENERATE IMG2IMG',
+                                                           variant='primary')
+                
+                
             with gr.Column():
                 with gr.Tabs():
                     with gr.TabItem('Output'):
@@ -474,13 +697,21 @@ def ui(pipe, config):
         
         copy_out_to_in.click(fn=lambda x: x, inputs=[output], outputs=[input_image])
         copy_out_to_in_face.click(fn=lambda x: x, inputs=[output], outputs=[input_image_face])
-
+        copy_out_to_in_xl.click(fn=lambda x: x, inputs=[output], outputs=[input_image_xl_i2i])
+        
         checkpoint.input(pipe.load_checkpoint,
                          inputs=[checkpoint],
                          outputs=[checkpoint],
                          show_progress='full',
                          queue=True)
 
+    
+        checkpoint_xl_i2i.input(pipe.load_sdxl_i2i_checkpoint,
+                                inputs=[checkpoint_xl_i2i],
+                                outputs=[checkpoint_xl_i2i],
+                                show_progress='full',
+                                queue=True)
+        
         generate.click(fn=pipe.generate_image,
                        inputs=[prompt,
                                negative_prompt,
@@ -493,9 +724,30 @@ def ui(pipe, config):
                                steps,
                                lora,
                                lora_weight_base,
-                               gr_scheduler],
+                               gr_scheduler,
+                               use_latent_upscale,
+                               latent_num_steps,
+                               latent_guidance_scale,
+                               img2img_scale_factor],
                        outputs=[output, last_seed])
 
+        generate_img2img_xl.click(fn=pipe.generate_img2img_xl,
+                                  inputs=[
+                                      prompt_xl_i2i,
+                                      negative_prompt_xl_i2i,
+                                      input_image_xl_i2i,
+                                      denoise_xl_img_strength,
+                                      width,
+                                      height,
+                                      g_scale,
+                                      seed,
+                                      steps,
+                                      lora_xl_img2img,
+                                      lora_xl_weight_img2img,
+                                      gr_scheduler,
+                                      img2img_xl_scale_factor],
+                                  outputs=[output, last_seed])
+        
         generate_img2img.click(fn=pipe.generate_image,
                                inputs=[prompt,
                                        negative_prompt,
@@ -508,7 +760,11 @@ def ui(pipe, config):
                                        steps,
                                        lora_img2img,
                                        lora_weight_img2img,
-                                       gr_scheduler],
+                                       gr_scheduler,
+                                       use_latent_upscale,
+                                       latent_num_steps,
+                                       latent_guidance_scale,
+                                       img2img_scale_factor],
                                outputs=[output, last_seed])
 
         regen_face.click(fn=pipe.regen_face,
@@ -524,7 +780,11 @@ def ui(pipe, config):
                                  steps,
                                  lora_face,
                                  lora_face_weight,
-                                 gr_scheduler],
+                                 gr_scheduler,
+                                 use_latent_upscale,
+                                 latent_num_steps,
+                                 latent_guidance_scale,
+                                 img2img_scale_factor],
                          outputs=[output, postprocessed])
 
         reset_seed.click(fn=lambda x: -1, outputs=[seed])
