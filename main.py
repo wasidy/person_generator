@@ -13,6 +13,7 @@ from diffusers import EulerAncestralDiscreteScheduler, DPMSolverMultistepSchedul
 from diffusers import AutoencoderKL
 from diffusers import StableDiffusionLatentUpscalePipeline
 from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
+from diffusers import StableDiffusionXLPipeline
 from diffusers import StableDiffusionXLImg2ImgPipeline
 
 from PIL import Image, ImageFilter, ImageEnhance
@@ -48,6 +49,99 @@ schedulers = {
     'EulerAncestralDiscreteScheduler': EulerAncestralDiscreteScheduler,
     'DPMSolverMultistepScheduler': DPMSolverMultistepScheduler
 }
+
+schedulers_list = [
+    'DPM++ 2M',
+    'DPM++ 2M Karras',
+    'DPM++ 2M SDE',
+    'DPM++ 2M SDE Karras',
+    'DPM++ SDE',
+    'DPM++ SDE Karras',
+    'DPM2',
+    'DPM2 Karras',
+    'DPM2 a',
+    'DPM2 a Karras',
+    'Euler',
+    'Euler a',
+    'Heun',
+    'LMS',
+    'LMS Karras',
+    'DEIS',
+    'UniPC'
+    ]
+
+def get_scheduler(scheduler):
+    print (scheduler)
+    match scheduler:
+        case 'DPM++ 2M':
+            fn = DPMSolverMultistepScheduler
+            kwargs = {}
+        case 'DPM++ 2M Karras':
+            fn = DPMSolverMultistepScheduler
+            kwargs = {'use_karras_sigmas': True}
+        case 'DPM++ 2M SDE':
+            fn =  DPMSolverMultistepScheduler
+            kwargs = {'algorithm_type' : 'sde-dpmsolver++'}
+        case 'DPM++ 2M SDE Karras':
+            fn =  DPMSolverMultistepScheduler
+            kwargs= {'use_karras_sigmas' : True, 'algorithm_type' : 'sde-dpmsolver++'}
+        case 'DPM++ SDE':
+            fn = DPMSolverSinglestepScheduler
+            kwargs = {}
+        case 'DPM++ SDE Karras':
+            fn = DPMSolverSinglestepScheduler
+            kwargs = {'use_karras_sigmas' : True}
+        case 'DPM2':
+            fn = KDPM2DiscreteScheduler
+        case 'DPM2 Karras':
+            fn = KDPM2DiscreteScheduler
+            kwargs = {'use_karras_sigmas' : True}
+        case 'DPM2 a':
+            fn = KDPM2AncestralDiscreteScheduler
+            kwargs = {}
+        case 'DPM2 a Karras':
+            fn = KDPM2AncestralDiscreteScheduler
+            kwargs = {'use_karras_sigmas' : True}
+        case 'Euler':
+            fn = EulerDiscreteScheduler
+            kwargs = {}
+        case 'Euler a':
+            fn = EulerAncestralDiscreteScheduler
+        case 'Heun':
+            fn = HeunDiscreteScheduler
+        case 'LMS':
+            fn = LMSDiscreteScheduler
+        case 'LMS Karras':
+            fn = LMSDiscreteScheduler
+            kwargs = {'use_karras_sigmas' : True}
+        case 'DEIS':
+            fn = DEISMultistepScheduler
+            kwargs = {}
+        case 'UniPC':
+            fn = UniPCMultistepScheduler
+            kwargs = {}
+    return fn, kwargs
+
+class CheckPoints():
+    def __init__(self, *folders):
+        self.folders = list(os.path.join(f, '') for f in folders)
+        self.checkpoints = dict()
+
+    def get_checkpoint_names(self, extentions=['.safetensors', '.cpkt']):
+        # TODO Поиск префикса по регулярным выражениям!!!
+        for f in self.folders:
+            flist = os.listdir(f)
+            for fname in flist:
+                if os.path.splitext(fname)[1] in extentions:
+                    prefix = f[-5:-1] + ' - '
+                    full_path = f+fname
+                    show_name = prefix + os.path.splitext(fname)[0]
+                    self.checkpoints[show_name] = full_path
+        return list(self.checkpoints.keys())
+
+    def get_checkpoint_path(self, key):
+        return self.checkpoints[key]
+
 
 
 def disabled_safety_checker(images, clip_input):
@@ -108,6 +202,7 @@ def save_image(image, path):
     return None
 
 
+
 class SDPipe():
     def __init__(self, config):
         self.path = config['checkpoints_folder']
@@ -116,6 +211,49 @@ class SDPipe():
         self.lora_path = config['lora_folder']
         self.lora_face_path = config['lora_face_folder']
         self.active_pipe = 'text2img'
+        self.pipe = None
+        self.img2img = None
+
+    def load_model(self, checkpoints, key):
+        path = checkpoints.get_checkpoint_path(key)
+        model_type = key[0:4]
+        print(f'Loading model: {path}, type of model: {model_type}')
+        if model_type == 'SDXL':
+            if self.pipe is not None:
+                del self.pipe
+            if self.img2img is not None:
+                del self.img2img
+            self.pipe = StableDiffusionXLPipeline.from_single_file(
+                path,
+                torch_dtype=torch.float16,
+                use_safetensors=True
+                )
+            self.img2img = StableDiffusionXLImg2ImgPipeline(
+                vae=self.pipe.vae,
+                text_encoder=self.pipe.text_encoder,
+                text_encoder_2=self.pipe.text_encoder_2,
+                tokenizer=self.pipe.tokenizer,
+                tokenizer_2=self.pipe.tokenizer_2,
+                unet=self.pipe.unet,
+                scheduler=self.pipe.scheduler
+                )
+            self.pipe.to('cuda')
+            self.pipe.enable_xformers_memory_efficient_attention()
+            self.img2img.to('cuda')
+            self.img2img.enable_xformers_memory_efficient_attention()
+            
+        elif model_type == 'SD15':
+            if self.pipe is not None:
+                del self.pipe
+            self.pipe = StableDiffusionPipeline.from_single_file(
+                 path,
+                 torch_dtype=torch.float16,
+                 use_safetensors=True,
+                 safety_checker=None
+                 )
+            self.pipe.to('cuda')
+        return key
+        
 
     def load_sdxl_i2i_checkpoint(self, filename):
         
@@ -195,6 +333,8 @@ class SDPipe():
                  safety_checker=None
                  )
             # Temp loading latent upscaler
+            # TODO Delete upscaler
+            
             self.upscaler = StableDiffusionLatentUpscalePipeline.from_pretrained(
                 pretrained_model_name_or_path='stabilityai/sd-x2-latent-upscaler',
                 #low_res_scheduler=DDPMScheduler(),
@@ -306,7 +446,12 @@ class SDPipe():
                        input_image,
                        denoise_strength,
                        width,
-                       height, g_scale, manual_seed, steps, lora_name, lora_weight,
+                       height, g_scale,
+                       manual_seed,
+                       steps,
+                       clip_skip,
+                       lora_name,
+                       lora_weight,
                        scheduler_name,
                        use_latent_upscale=False,
                        latent_num_steps=30,
@@ -356,7 +501,11 @@ class SDPipe():
 
 
 
-        current_pipe.scheduler = schedulers[scheduler_name].from_config(self.pipe.scheduler.config)
+        #current_pipe.scheduler = schedulers[scheduler_name].from_config(self.pipe.scheduler.config)
+        scheduler, kwargs = get_scheduler(scheduler_name)
+        current_pipe.scheduler = scheduler.from_config(self.pipe.scheduler.config,
+                                                       **kwargs)
+        
         if use_latent_upscale:
         
             low_res_image = current_pipe(prompt=positive_prompt,
@@ -387,6 +536,7 @@ class SDPipe():
                                   generator=generator,
                                   safety_checker=None,
                                   num_inference_steps=steps,
+                                  clip_skip=clip_skip,
                                   height=(height//8)*8, width=(width//8)*8,
                                   cross_attention_kwargs={"scale": lora_scale},
                                   g_scale=g_scale, **args).images[0]
@@ -430,7 +580,11 @@ def ui(pipe, config):
     checkpoints_path = config['checkpoints_folder']
     lora_path = config['lora_folder']
     lora_face_path = config['lora_face_folder']
-    checkpoints = get_file_list(checkpoints_path, ['.safetensors'])
+    #checkpoints = get_file_list(checkpoints_path, ['.safetensors'])
+    SD15_folder = 'D:/SD/models/SD15/'
+    SDXL_folder = 'D:/SD/models/SDXL/'
+    checkpoints = CheckPoints(SD15_folder, SDXL_folder)
+    checkpoints_list = checkpoints.get_checkpoint_names()
     loras = ['None'] + get_file_list(lora_path, ['.safetensors'])
     loras_face = ['None'] + get_file_list(lora_face_path, ['.safetensors'])
     images_bin = []
@@ -444,8 +598,8 @@ def ui(pipe, config):
                     with gr.Column():
                         with gr.Group():
                             checkpoint = gr.Dropdown(label='Checkpoint',
-                                                     choices=checkpoints,
-                                                     value=checkpoints[0],
+                                                     choices=checkpoints_list,
+                                                     value=checkpoints_list[0],
                                                      interactive=True)
                             lora = gr.Dropdown(label='Lora',
                                                choices=loras,
@@ -473,7 +627,7 @@ def ui(pipe, config):
                                                  size='lg',
                                                  variant='primary',
                                                  )
-                        with gr.Accordion('Latent upscale'):
+                        with gr.Accordion('Latent upscale', visible=False):
                             use_latent_upscale = gr.Checkbox(label='Use latent upscale',
                                                              value=False)
                             latent_num_steps = gr.Slider(label='Steps',
@@ -549,7 +703,7 @@ def ui(pipe, config):
                         with gr.Row():
                             with gr.Column():
                                 with gr.Accordion('Generation settings'):
-                                    schedulers_list = list(schedulers.keys())
+                                    # schedulers_list = list(schedulers.keys())
                                     gr_scheduler = gr.Dropdown(label='Scheduler',
                                                                choices=schedulers_list,
                                                                value=schedulers_list[0])
@@ -569,7 +723,15 @@ def ui(pipe, config):
                                                      precision=0,
                                                      interactive=True,
                                                      minimum=-1)
+                                    
                                     last_seed = gr.State(value=-1)
+                                    clip_skip = gr.Slider(label='Clip skip',
+                                                          value=0,
+                                                          minimum=0,
+                                                          maximum=8,
+                                                          step=1,
+                                                          interactive=True
+                                                          )
                                     reuse_last_seed = gr.Button(value="Reuse last seed")
                                     reset_seed = gr.Button(value='Reset seed')
                             with gr.Column():
@@ -584,11 +746,34 @@ def ui(pipe, config):
                                                        minimum=256,
                                                        maximum=2048,
                                                        step=8)
+# TODO Добавить вторую таблицу, для SD & SDXL отдельные
+# Менять варианты разрешения изображения при загрузке моделей
+                                    image_size_list = {
+                                        '512x512' : (512, 512),
+                                        '512x768' : (512, 768),
+                                        '768x512' : (768, 512),
+                                        '768x768' : (768, 768),
+                                        '1024x1024' : (1024, 1024),
+                                        '896x1152' : (896, 1152),
+                                        '1152x896' : (1152, 896),
+                                        '832x1216' : (832, 1216),
+                                        '1216x832' : (1216, 832),
+                                        '768x1344' : (768, 1344),
+                                        '1344x768' : (1344, 768),
+                                        '640x1536' : (640, 1536),
+                                        '1536x640' : (1536, 640),
+                                        }
+                                    image_sizes = gr.Dropdown(
+                                        label='Image size',
+                                        choices=list(image_size_list.keys()),
+                                        value=list(image_size_list.keys())[1],
+                                        interactive=True)
+                                        
                 with gr.TabItem('SDXL Img2Img'):
                     # TODO либо разделить чек-поинты, либо сделать фильтрацию
                     checkpoint_xl_i2i = gr.Dropdown(label='Checkpoint',
-                                                    choices=checkpoints,
-                                                    value=checkpoints[0],
+                                                    choices=checkpoints_list,
+                                                    value=checkpoints_list[0],
                                                     interactive=True)
                     with gr.Row():
     
@@ -699,7 +884,17 @@ def ui(pipe, config):
         copy_out_to_in_face.click(fn=lambda x: x, inputs=[output], outputs=[input_image_face])
         copy_out_to_in_xl.click(fn=lambda x: x, inputs=[output], outputs=[input_image_xl_i2i])
         
-        checkpoint.input(pipe.load_checkpoint,
+        def change_size(new_size):
+            width, height = image_size_list[new_size]
+            return width, height
+            
+        image_sizes.input(fn=change_size, inputs=[image_sizes], outputs=[width, height])
+        
+        def load_checkpoint_fn(checkpoint_name):
+            checkpoint = pipe.load_model(checkpoints, checkpoint_name)
+            return checkpoint
+            
+        checkpoint.input(fn=load_checkpoint_fn,
                          inputs=[checkpoint],
                          outputs=[checkpoint],
                          show_progress='full',
@@ -722,6 +917,7 @@ def ui(pipe, config):
                                g_scale,
                                seed,
                                steps,
+                               clip_skip,
                                lora,
                                lora_weight_base,
                                gr_scheduler,
@@ -758,6 +954,7 @@ def ui(pipe, config):
                                        g_scale,
                                        seed,
                                        steps,
+                                       clip_skip,
                                        lora_img2img,
                                        lora_weight_img2img,
                                        gr_scheduler,
