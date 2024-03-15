@@ -22,6 +22,7 @@ import numpy as np
 from utils.face_detector import FaceDetector
 from utils.pipelines import ClipSegmentation
 from utils.imageutils import image_dilate
+from utils.loracollection import LoraCollection
 import cv2
 from datetime import datetime
 import re
@@ -192,19 +193,29 @@ def save_image(image, path):
     # TODO! Write to folder with current date!
     img = Image.fromarray(image, mode='RGB')
     c_time = re.sub('[:. -]', '', str(datetime.today()))
-    f_name = path + c_time + '.png'
+    folder_name = os.path.join(path, datetime.today().strftime('%Y-%m-%d'), '')
+    
+    if not os.path.isdir(folder_name):
+        try:
+            os.mkdir(folder_name)
+            print(f'Created {folder_name} for saving')
+        except Warning:
+            print(f'Can not create folder {folder_name}. File not saved.')
+            return None
+        
+    f_name = folder_name + c_time + '.png'
     try:
         img.save(f_name)
         print(f'{f_name} saved!')
     except Warning:
         print(f'Error writing {f_name}')
-        return None
+        
     return None
 
 
 
 class SDPipe():
-    def __init__(self, config):
+    def __init__(self, config, lora_collection):
         self.path = config['checkpoints_folder']
         self.checkpoints = get_file_list(self.path, ['.safetensors'])
         self.load_checkpoint(self.checkpoints[0])
@@ -213,16 +224,18 @@ class SDPipe():
         self.active_pipe = 'text2img'
         self.pipe = None
         self.img2img = None
+        self.lora_collection = lora_collection
 
     def load_model(self, checkpoints, key):
         path = checkpoints.get_checkpoint_path(key)
         model_type = key[0:4]
+        if self.pipe is not None:
+            del self.pipe
+        if self.img2img is not None:
+            del self.img2img
         print(f'Loading model: {path}, type of model: {model_type}')
         if model_type == 'SDXL':
-            if self.pipe is not None:
-                del self.pipe
-            if self.img2img is not None:
-                del self.img2img
+            
             self.pipe = StableDiffusionXLPipeline.from_single_file(
                 path,
                 torch_dtype=torch.float16,
@@ -235,7 +248,8 @@ class SDPipe():
                 tokenizer=self.pipe.tokenizer,
                 tokenizer_2=self.pipe.tokenizer_2,
                 unet=self.pipe.unet,
-                scheduler=self.pipe.scheduler
+                scheduler=self.pipe.scheduler,
+                
                 )
             self.pipe.to('cuda')
             self.pipe.enable_xformers_memory_efficient_attention()
@@ -243,15 +257,24 @@ class SDPipe():
             self.img2img.enable_xformers_memory_efficient_attention()
             
         elif model_type == 'SD15':
-            if self.pipe is not None:
-                del self.pipe
+
             self.pipe = StableDiffusionPipeline.from_single_file(
                  path,
                  torch_dtype=torch.float16,
                  use_safetensors=True,
                  safety_checker=None
                  )
+            self.img2img = StableDiffusionImg2ImgPipeline(
+                vae=self.pipe.vae,
+                text_encoder=self.pipe.text_encoder,
+                tokenizer=self.pipe.tokenizer,
+                unet=self.pipe.unet,
+                scheduler=self.pipe.scheduler,
+                safety_checker=None,
+                feature_extractor=self.pipe.feature_extractor,
+                )
             self.pipe.to('cuda')
+            self.img2img.to('cuda')
         return key
         
 
@@ -382,10 +405,23 @@ class SDPipe():
                                     weight_name=self.lora_path + lora_name,
                                     adapter_name='custom_lora')
 
-    def regen_face(self, positive_prompt, negative_prompt, input_image, output_image,
-                   denoise_strength, width,
-                   height, g_scale, manual_seed, steps, lora_name, lora_weight,
-                   scheduler_name, *args):
+    def regen_face(self,
+                   positive_prompt,
+                   negative_prompt,
+                   input_image,
+                   output_image,
+                   denoise_strength,
+                   width,
+                   height,
+                   g_scale,
+                   manual_seed,
+                   steps,
+                   clip_skip,
+                   lora_name,
+                   lora_weight,
+                   scheduler_name,
+                   *args):
+
         if not isinstance(input_image, np.ndarray):
             if not isinstance(output_image, np.ndarray):
                 print('No image')
@@ -394,9 +430,6 @@ class SDPipe():
                 input_image = output_image
 
         mask, faces = face_detector(input_image, expand_value=1.4)
-        if lora_name !='None':
-            lora_name = 'face/' + lora_name
-        # lora_name = self.lora_person_path + lora_name
         
         if len(faces) > 0:
             x1, y1, x2, y2 = faces[0].coords
@@ -405,6 +438,7 @@ class SDPipe():
             face_image = Image.fromarray(faces[0].image, mode='RGB')
             print(f'Face image size: {face_image.size}')
             face_image = np.array(face_image.resize((gen_size, gen_size)), dtype=np.uint8)
+            
             gen_img, seed = self.generate_image(positive_prompt,
                                                 negative_prompt,
                                                 face_image,
@@ -414,6 +448,7 @@ class SDPipe():
                                                 g_scale,
                                                 manual_seed,
                                                 steps,
+                                                clip_skip,
                                                 lora_name,
                                                 lora_weight,
                                                 scheduler_name
@@ -435,18 +470,20 @@ class SDPipe():
             
             new_image = input_image.copy()
             new_image[y1:y2, x1:x2, :] = np.array(img_matched_colors, dtype=np.uint8)
-            # new_image[y1:y2, x1:x2, :] = np.array(generated_image, dtype=np.uint8)
+            
             new_image_wf = Image.fromarray(new_image)
             target = Image.fromarray(input_image, mode='RGB')
             target.paste(new_image_wf, (0, 0), mask=alpha)
         return target, alpha
 
-    def generate_image(self, positive_prompt,
+    def generate_image(self,
+                       positive_prompt,
                        negative_prompt,
                        input_image,
                        denoise_strength,
                        width,
-                       height, g_scale,
+                       height,
+                       g_scale,
                        manual_seed,
                        steps,
                        clip_skip,
@@ -481,12 +518,13 @@ class SDPipe():
 
         if isinstance(lora_name, str):
             if lora_name != 'None':
-                print(f'Lora loaded: {lora_name}')
+                print(f'Loading LoRa: {lora_name}')
                 adapter_name = lora_name[0:lora_name.find('.')]
-                current_pipe.load_lora_weights(self.lora_path + lora_name,
-                                               weight_name=self.lora_path + lora_name,
+                lora_path = self.lora_collection.get_path(lora_name)
+                current_pipe.load_lora_weights(lora_path,
+                                               weight_name=lora_path,
                                                adapter_name=adapter_name)
-                trigger_words = load_trigger_words(self.lora_path + lora_name)
+                trigger_words = self.lora_collection.get_trigger_words(lora_name)
                 positive_prompt = positive_prompt + ', ' + trigger_words
                 print(f'New prompt: {positive_prompt}')
                 current_pipe.set_adapters(adapter_name)
@@ -575,18 +613,38 @@ def postprocess(input_img):
     print('Image postprocessed with LUT')
     return fin_img
 
+def get_list_with_prefix(choices, prefix):
+    temp_list = list()
+    for s in choices:
+        if s.startswith(prefix):
+            temp_list.append(s)
+    return temp_list
 
-def ui(pipe, config):
+def ui(pipe, config, lora_collection):
     checkpoints_path = config['checkpoints_folder']
     lora_path = config['lora_folder']
     lora_face_path = config['lora_face_folder']
     #checkpoints = get_file_list(checkpoints_path, ['.safetensors'])
     SD15_folder = 'D:/SD/models/SD15/'
     SDXL_folder = 'D:/SD/models/SDXL/'
+    SD15_lora_folder = 'D:/Lora/base/SD15/'
+    SDXL_lora_folder = 'D:/Lora/base/SDXL/'
+    
     checkpoints = CheckPoints(SD15_folder, SDXL_folder)
     checkpoints_list = checkpoints.get_checkpoint_names()
-    loras = ['None'] + get_file_list(lora_path, ['.safetensors'])
-    loras_face = ['None'] + get_file_list(lora_face_path, ['.safetensors'])
+    
+    current_checkpoint_prefix = checkpoints_list[0][0:4]
+    loras_checkpoints = CheckPoints(SD15_lora_folder, SDXL_lora_folder)
+    #active_loras_list = loras_checkpoints.get_checkpoint_names()
+    active_loras_list = lora_collection.get_list
+    active_loras_list.insert(0, 'None')
+    #active_loras_list = get_list_with_prefix(all_loras_list, current_checkpoint_prefix)
+    #active_loras_list.insert(0, 'None')
+    
+    #loras = ['None'] + get_file_list(lora_path, ['.safetensors'])
+    loras = active_loras_list
+    loras_face = lora_collection.get_list_by_key('character')
+    #loras_face = ['None'] + get_file_list(lora_face_path, ['.safetensors'])
     images_bin = []
 
     with gr.Blocks() as demo:
@@ -602,8 +660,8 @@ def ui(pipe, config):
                                                      value=checkpoints_list[0],
                                                      interactive=True)
                             lora = gr.Dropdown(label='Lora',
-                                               choices=loras,
-                                               value=loras[0],
+                                               choices=active_loras_list,
+                                               value=active_loras_list[0],
                                                interactive=True
                                                )
                             lora_weight_base = gr.Slider(label='Weight:',
@@ -892,6 +950,7 @@ def ui(pipe, config):
         
         def load_checkpoint_fn(checkpoint_name):
             checkpoint = pipe.load_model(checkpoints, checkpoint_name)
+            
             return checkpoint
             
         checkpoint.input(fn=load_checkpoint_fn,
@@ -926,23 +985,6 @@ def ui(pipe, config):
                                latent_guidance_scale,
                                img2img_scale_factor],
                        outputs=[output, last_seed])
-
-        generate_img2img_xl.click(fn=pipe.generate_img2img_xl,
-                                  inputs=[
-                                      prompt_xl_i2i,
-                                      negative_prompt_xl_i2i,
-                                      input_image_xl_i2i,
-                                      denoise_xl_img_strength,
-                                      width,
-                                      height,
-                                      g_scale,
-                                      seed,
-                                      steps,
-                                      lora_xl_img2img,
-                                      lora_xl_weight_img2img,
-                                      gr_scheduler,
-                                      img2img_xl_scale_factor],
-                                  outputs=[output, last_seed])
         
         generate_img2img.click(fn=pipe.generate_image,
                                inputs=[prompt,
@@ -975,6 +1017,7 @@ def ui(pipe, config):
                                  g_scale,
                                  seed,
                                  steps,
+                                 clip_skip,
                                  lora_face,
                                  lora_face_weight,
                                  gr_scheduler,
@@ -1000,7 +1043,8 @@ if __name__ == '__main__':
 
     clip_predict = ClipSegmentation('CIDAS/clipseg-rd64-refined', 'CIDAS/clipseg-rd64-refined')
     face_detector = FaceDetector(clip_predict)
-    pipe = SDPipe(config)
+    lora_collection = LoraCollection(config['lora_folder'])
+    pipe = SDPipe(config, lora_collection)
 
-    demo = ui(pipe, config)
+    demo = ui(pipe, config, lora_collection)
     demo.launch(server_name='0.0.0.0')
