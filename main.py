@@ -82,7 +82,8 @@ def get_scheduler(scheduler):
             kwargs = {'use_karras_sigmas': True}
         case 'DPM++ 2M SDE':
             fn =  DPMSolverMultistepScheduler
-            kwargs = {'algorithm_type' : 'sde-dpmsolver++'}
+            kwargs = {'algorithm_type' : 'sde-dpmsolver++',                     
+                      'euler_at_final' : True}
         case 'DPM++ 2M SDE Karras':
             fn =  DPMSolverMultistepScheduler
             kwargs= {'use_karras_sigmas' : True, 'algorithm_type' : 'sde-dpmsolver++'}
@@ -94,6 +95,7 @@ def get_scheduler(scheduler):
             kwargs = {'use_karras_sigmas' : True}
         case 'DPM2':
             fn = KDPM2DiscreteScheduler
+            kwargs = {}
         case 'DPM2 Karras':
             fn = KDPM2DiscreteScheduler
             kwargs = {'use_karras_sigmas' : True}
@@ -108,10 +110,13 @@ def get_scheduler(scheduler):
             kwargs = {}
         case 'Euler a':
             fn = EulerAncestralDiscreteScheduler
+            kwargs = {}
         case 'Heun':
             fn = HeunDiscreteScheduler
+            kwargs = {}
         case 'LMS':
             fn = LMSDiscreteScheduler
+            kwargs = {}
         case 'LMS Karras':
             fn = LMSDiscreteScheduler
             kwargs = {'use_karras_sigmas' : True}
@@ -217,13 +222,20 @@ def save_image(image, path):
 class SDPipe():
     def __init__(self, config, lora_collection):
         self.path = config['checkpoints_folder']
-        self.checkpoints = get_file_list(self.path, ['.safetensors'])
-        self.load_checkpoint(self.checkpoints[0])
+        #self.checkpoints = get_file_list(self.path, ['.safetensors'])
+        
+        SD15_folder = 'D:/SD/models/SD15/'
+        SDXL_folder = 'D:/SD/models/SDXL/'
+        self.pipe = None
+        self.img2img = None
+        
+        self.checkpoints = CheckPoints(SD15_folder, SDXL_folder)
+        self.checkpoints_list = self.checkpoints.get_checkpoint_names()
+        self.load_model(self.checkpoints, self.checkpoints_list[0])
         self.lora_path = config['lora_folder']
         self.lora_face_path = config['lora_face_folder']
         self.active_pipe = 'text2img'
-        self.pipe = None
-        self.img2img = None
+       
         self.lora_collection = lora_collection
 
     def load_model(self, checkpoints, key):
@@ -249,12 +261,13 @@ class SDPipe():
                 tokenizer_2=self.pipe.tokenizer_2,
                 unet=self.pipe.unet,
                 scheduler=self.pipe.scheduler,
-                
                 )
+
+            
             self.pipe.to('cuda')
-            self.pipe.enable_xformers_memory_efficient_attention()
+            #self.pipe.enable_xformers_memory_efficient_attention()
             self.img2img.to('cuda')
-            self.img2img.enable_xformers_memory_efficient_attention()
+            #self.img2img.enable_xformers_memory_efficient_attention()
             
         elif model_type == 'SD15':
 
@@ -275,6 +288,8 @@ class SDPipe():
                 )
             self.pipe.to('cuda')
             self.img2img.to('cuda')
+        print(f'Cuda memory allocated: {torch.cuda.memory_allocated()/1024**2}')
+        print(f'Cuda memory reserved: {torch.cuda.memory_reserved()/1024**2}')
         return key
         
 
@@ -396,6 +411,8 @@ class SDPipe():
             #self.pipe.load_textual_inversion("ti/browncoat42.safetensors", 'browncoat42')
             
             print(f'Checkpoint {self.path + filename} loaded!')
+            print(f'Cuda memory allocated: {torch.cuda.memory_allocated()/1024**2}')
+            print(f'Cuda memory reserved: {torch.cuda.memory_reserved()/1024**2}')
         except Warning:
             print('Checkpoint corrupted!')
         return filename
@@ -541,7 +558,7 @@ class SDPipe():
 
         #current_pipe.scheduler = schedulers[scheduler_name].from_config(self.pipe.scheduler.config)
         scheduler, kwargs = get_scheduler(scheduler_name)
-        current_pipe.scheduler = scheduler.from_config(self.pipe.scheduler.config,
+        current_pipe.scheduler = scheduler.from_config(current_pipe.scheduler.config,
                                                        **kwargs)
         
         if use_latent_upscale:
@@ -644,7 +661,7 @@ def ui(pipe, config, lora_collection):
     #loras = ['None'] + get_file_list(lora_path, ['.safetensors'])
     loras = active_loras_list
     loras_face = lora_collection.get_list_by_key('character')
-    #loras_face = ['None'] + get_file_list(lora_face_path, ['.safetensors'])
+    loras_face.insert(0, 'None') 
     images_bin = []
 
     with gr.Blocks() as demo:
